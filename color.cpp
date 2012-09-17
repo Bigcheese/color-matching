@@ -95,9 +95,7 @@ CIELab10degD65 CIEXYZ10degD65ToCIELab10degD65(const CIEXYZ10degD65 &color) {
   return ret;
 }
 
-CIELCh10degD65 convert(sRGB other) {
-  CIEXYZ10degD65 XYZ = sRGBToCIEXYZ10degD65(other);
-  CIELab10degD65 Lab = CIEXYZ10degD65ToCIELab10degD65(XYZ);
+CIELCh10degD65 CIELab10degD65ToCIELCh10degD65(const CIELab10degD65 &Lab) {
   CIELCh10degD65 ret;
   ret.L = Lab.L;
   ret.C = std::pow(std::pow(Lab.a, 2) + std::pow(Lab.b, 2), 1. / 2.);
@@ -109,10 +107,18 @@ CIELCh10degD65 convert(sRGB other) {
   return ret;
 }
 
-double cmc_distance(CIELCh10degD65 a, CIELCh10degD65 b, double l, double c) {
+CIELCh10degD65 convert(sRGB other) {
+  CIEXYZ10degD65 XYZ = sRGBToCIEXYZ10degD65(other);
+  CIELab10degD65 Lab = CIEXYZ10degD65ToCIELab10degD65(XYZ);
+  return CIELab10degD65ToCIELCh10degD65(Lab);
+}
+
+double cmc_distance(CIELCh10degD65 a, CIELab10degD65 al, CIELCh10degD65 b, CIELab10degD65 bl, double l, double c) {
   double deltaL = a.L - b.L;
   double deltaC = a.C - b.C;
-  double deltaH = a.h - b.h;
+  double deltaH = std::pow(std::pow(al.a - bl.a, 2) +
+                           std::pow(al.b - bl.b, 2) -
+                           std::pow(deltaC, 2), 0.5);
   double Sl = a.L < 16.
             ? 0.511
             : (0.040975 * a.L) / (1. + 0.01765 * a.L);
@@ -140,49 +146,73 @@ int main(int argc, const char **argv) {
   in.R /= 255.;
   in.G /= 255.;
   in.B /= 255.;
-  CIELCh10degD65 inLCh = convert(in);
+  CIEXYZ10degD65 inXYZ = sRGBToCIEXYZ10degD65(in);
+  CIELab10degD65 inLab = CIEXYZ10degD65ToCIELab10degD65(inXYZ);
+  CIELCh10degD65 inLCh = CIELab10degD65ToCIELCh10degD65(inLab);
   std::cout << "L*=" << inLCh.L << " C*=" << inLCh.C << " h=" << inLCh.h << "\n";
 
   if (argc < 2)
     return 0;
 
-  std::ifstream colorFile(argv[1]);
-  // Skip the first line.
-  std::string line;
-  if (!std::getline(colorFile, line))
-    return 1;
-
   // For each thread color, try to get a match.
-  std::string bestNum, bestName;
+  std::string bestNum, bestName, bestFileName;
   double bestDeltaE = 1000000.;
   CIELCh10degD65 bestLCh;
   sRGB bestColor;
-  while (colorFile) {
-    std::string num, r, g, b, name;
-    std::getline(colorFile, num, ',');
-    std::getline(colorFile, r, ',');
-    std::getline(colorFile, g, ',');
-    std::getline(colorFile, b, ',');
-    std::getline(colorFile, name);
-    if (r.empty() || g.empty() || b.empty())
-      break;
-    sRGB color = { boost::lexical_cast<double>(r) / 255.
-                 , boost::lexical_cast<double>(g) / 255.
-                 , boost::lexical_cast<double>(b) / 255.};
-//    if (name == "Pure White")
-//      __debugbreak();
-    CIELCh10degD65 LCh = convert(color);
-    double deltaE = cmc_distance(inLCh, LCh, 2, 1);
-    if (deltaE < bestDeltaE) {
-      bestDeltaE = deltaE;
-      bestNum = num;
-      bestName = name;
-      bestLCh = LCh;
-      bestColor = color;
+
+  auto testColor = [&](boost::filesystem::path path) {
+    std::ifstream colorFile(path.string());
+    // Skip the first line.
+    std::string line;
+    if (!std::getline(colorFile, line))
+      return;
+
+    while (colorFile) {
+      std::string num, r, g, b, name;
+      std::getline(colorFile, num, ',');
+      std::getline(colorFile, r, ',');
+      std::getline(colorFile, g, ',');
+      std::getline(colorFile, b, ',');
+      std::getline(colorFile, name);
+      if (r.empty() || g.empty() || b.empty())
+        break;
+      sRGB color = { boost::lexical_cast<double>(r) / 255.
+                    , boost::lexical_cast<double>(g) / 255.
+                    , boost::lexical_cast<double>(b) / 255.};
+      CIEXYZ10degD65 XYZ = sRGBToCIEXYZ10degD65(color);
+      CIELab10degD65 Lab = CIEXYZ10degD65ToCIELab10degD65(XYZ);
+      CIELCh10degD65 LCh = CIELab10degD65ToCIELCh10degD65(Lab);
+      double deltaE = cmc_distance(inLCh, inLab, LCh, Lab, 2, 1);
+      if (deltaE < bestDeltaE) {
+        bestDeltaE = deltaE;
+        bestNum = num;
+        bestName = name;
+        bestLCh = LCh;
+        bestColor = color;
+        bestFileName = path.filename().string();
+      }
     }
+  };
+
+  try {
+    if (boost::filesystem::is_directory(argv[1])) {
+      boost::filesystem::directory_iterator di(argv[1]);
+      boost::filesystem::directory_iterator de;
+      for (; di != de; ++di) {
+        if (di->path().extension() != ".thr")
+          continue;
+        testColor(di->path());
+      }
+    } else {
+      testColor(boost::filesystem::path(argv[1]));
+    }
+  } catch (const std::exception &e) {
+    std::cerr << "Blarg!: " << e.what() << "\n";
+  } catch (...) {
+    std::cerr << "Unknown exception\n";
   }
 
-  std::cout << "Nearest match: " << bestDeltaE << " " << bestNum << " " << bestName << "\n";
+  std::cout << "Nearest match: " << bestDeltaE << " " << bestNum << " " << bestName << " " << bestFileName << "\n";
   std::cout << "L*=" << bestLCh.L << " C*=" << bestLCh.C << " h=" << bestLCh.h << "\n";
   std::cout << "sR=" << bestColor.R << " sG=" << bestColor.G << " sB=" << bestColor.B << "\n";
 }
